@@ -1,4 +1,26 @@
 import libc
+import Foundation
+
+extension NSDateFormatter {
+    private static func makeRFC1123() -> NSDateFormatter {
+        // https://github.com/Fykec/NSDate-RFC1123/blob/master/NSDate%2BRFC1123.swift
+        let dateFormatter = NSDateFormatter()
+        dateFormatter.locale = NSLocale(localeIdentifier: "en_US")
+        dateFormatter.timeZone = NSTimeZone(name: "GMT")
+        dateFormatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss z"
+        return dateFormatter
+    }
+}
+
+extension NSDate {
+    private func rfc1123() -> String {
+        // Using this to cache the date. Formatters take time to load
+        struct Formatter {
+            static let rfc1123 = NSDateFormatter.makeRFC1123()
+        }
+        return Formatter.rfc1123.string(from: self)
+    }
+}
 
 extension Response {
     /**
@@ -82,25 +104,7 @@ extension Response {
     }
 
     public static var date: String {
-        let DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-        let MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-        let RFC1123_TIME_LEN = 29
-        var t: time_t = 0
-        var tm: libc.tm = libc.tm()
-
-        let buf = UnsafeMutablePointer<Int8>.init(allocatingCapacity: RFC1123_TIME_LEN + 1)
-        defer { buf.deallocateCapacity(RFC1123_TIME_LEN + 1) }
-
-        time(&t)
-        gmtime_r(&t, &tm)
-
-        strftime(buf, RFC1123_TIME_LEN+1, "---, %d --- %Y %H:%M:%S GMT", &tm)
-        memcpy(buf, DAY_NAMES[Int(tm.tm_wday)], 3)
-        memcpy(buf+8, MONTH_NAMES[Int(tm.tm_mon)], 3)
-
-
-        return String(pointer: buf, length: RFC1123_TIME_LEN + 1) ?? ""
+        return NSDate().rfc1123()
     }
 
     public var cookies: [String: String] {
