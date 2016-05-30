@@ -10,7 +10,7 @@
 import XCTest
 
 class SessionTests: XCTestCase {
-    static var allTests: [(String, SessionTests -> () throws -> Void)] {
+    static var allTests: [(String, (SessionTests) -> () throws -> Void)] {
         return [
            ("testDestroy_asksDriverToDestroy", testDestroy_asksDriverToDestroy),
            ("testSubscriptGet_asksDriverForValue", testSubscriptGet_asksDriverForValue),
@@ -76,7 +76,7 @@ class SessionTests: XCTestCase {
 
         var sessionMiddleware: SessionMiddleware?
 
-        for middleware in app.middleware {
+        for middleware in app.globalMiddleware {
             if let middleware = middleware as? SessionMiddleware {
                 sessionMiddleware = middleware
             }
