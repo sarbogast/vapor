@@ -1,23 +1,21 @@
 import libc
 import MediaType
 
-public class Application {
-    public static let VERSION = "0.8.0"
+public let VERSION = "0.9.1"
 
+public class Application {
     /**
         The router driver is responsible
         for returning registered `Route` handlers
         for a given request.
     */
-    public lazy var router: RouterDriver = BranchRouter()
+    public var router: RouterDriver
 
     /**
-        The server driver is responsible
-        for handling connections on the desired port.
-        This property is constant since it cannot
-        be changed after the server has been booted.
+        When starting the application, the server will attempt to be initialized
+        from the given type
     */
-    public var server: Server?
+    public var serverType: Server.Type
 
     /**
         The session driver is responsible for
@@ -27,9 +25,14 @@ public class Application {
     public let session: SessionDriver
 
     /**
-        Provides access to config settings.
-    */
-    public lazy var config: Config = Config(application: self)
+     Provides access to config settings.
+     */
+    public let config: Config
+
+    /**
+     Provides access to config settings.
+     */
+    public let localization: Localization
 
     /**
         Provides access to the underlying
@@ -38,44 +41,26 @@ public class Application {
     public let hash: Hash
 
     /**
-        `Middleware` will be applied in the order
-        it is set in this array.
-
-        Make sure to append your custom `Middleware`
-        if you don't want to overwrite default behavior.
+        The base host to serve for a given application. Set through Config
+     
+        Command Line Argument:
+            `--config:app.host=127.0.0.1`
+         
+        Config:
+            Set "host" key in app.json file
     */
-    public var middleware: [Middleware]
+    public let host: String
 
     /**
-        Provider classes that have been registered
-        with this application
-    */
-    public var providers: [Provider]
+        The port the application should listen to. Set through Config
 
-    /**
-        Internal value populated the first time
-        self.environment is computed
-    */
-    private var detectedEnvironment: Environment?
+        Command Line Argument:
+            `--config:app.port=8080`
 
-    /**
-        Current environment of the application
+        Config:
+            Set "port" key in app.json file
     */
-    public var environment: Environment {
-        if let environment = self.detectedEnvironment {
-            return environment
-        }
-
-        let environment = bootEnvironment()
-        self.detectedEnvironment = environment
-        return environment
-    }
-
-    /**
-        Optional handler to be called when detecting the
-        current environment.
-    */
-    public var detectEnvironmentHandler: ((String) -> Environment)?
+    public let port: Int
 
     /**
         The work directory of your application is
@@ -83,13 +68,22 @@ public class Application {
         folders are stored. This is normally `./` if
         you are running Vapor using `.build/xxx/App`
     */
-    public var workDir = "./" {
-        didSet {
-            if self.workDir.characters.last != "/" {
-                self.workDir += "/"
-            }
-        }
-    }
+    public let workDir: String
+
+    /**
+        `Middleware` will be applied in the order
+        it is set in this array.
+
+        Make sure to append your custom `Middleware`
+        if you don't want to overwrite default behavior.
+     */
+    public var globalMiddleware: [Middleware]
+
+    /**
+        Provider classes that have been registered
+        with this application
+     */
+    public var providers: [Provider]
 
     /**
         Resources directory relative to workDir
@@ -98,136 +92,92 @@ public class Application {
         return workDir + "Resources/"
     }
 
-    var scopedHost: String?
-    var scopedMiddleware: [Middleware] = []
-    var scopedPrefix: String?
-
-    var port: Int = 80
-    var ip: String = "0.0.0.0"
-
     var routes: [Route] = []
 
     /**
         Initialize the Application.
     */
-    public init(sessionDriver: SessionDriver? = nil) {
-        self.middleware = [
-            AbortMiddleware(),
-            ValidationMiddleware()
-        ]
-
+    public init(
+        workDir overrideWorkDir: String? = nil,
+        sessionDriver: SessionDriver? = nil,
+        config overrideConfig: Config? = nil,
+        localization overrideLocalization: Localization? = nil,
+        hash: Hash = Hash(),
+        server: Server.Type = HTTPStreamServer<ServerSocket>.self,
+        router: RouterDriver = BranchRouter()
+    ) {
+        self.hash = hash
+        self.session = sessionDriver ?? MemorySessionDriver(hash: hash)
         self.providers = []
 
-        let hash = Hash()
-        
-        self.session = sessionDriver ?? MemorySessionDriver(hash: hash)
-        self.hash = hash
+        let workDir = overrideWorkDir
+            ?? Process.valueFor(argument: "workDir")
+            ?? "./"
+        self.workDir = workDir.finish("/")
 
-        self.middleware.append(
+        let localization = overrideLocalization ?? Localization(workingDirectory: workDir)
+        self.localization = localization
+
+        let config = overrideConfig ?? Config(workingDirectory: workDir)
+        self.config = config
+        self.host = config["app", "host"].string ?? "0.0.0.0"
+        self.port = config["app", "port"].int ?? 80
+
+        self.globalMiddleware = [
+            AbortMiddleware(),
+            ValidationMiddleware(),
             SessionMiddleware(session: session)
-        )
+        ]
+
+        self.router = router
+        self.serverType = server
+        restrictLogging(for: config.environment)
     }
 
-    public func bootProviders() {
+    private func restrictLogging(for environment: Environment) {
+        guard config.environment == .production else { return }
+        Log.info("Production environment detected, disabling information logs.")
+        Log.enabledLevels = [.error, .fatal]
+    }
+}
+
+extension Application {
+    /**
+        Boots the chosen server driver and
+        optionally runs on the supplied
+        ip & port overrides
+    */
+    public func start() {
+        bootProviders()
+        bootRoutes()
+
+        // no return - code beyond this call will only execute in event of failure
+        startServer()
+    }
+
+    func bootProviders() {
         for provider in self.providers {
             provider.boot(with: self)
         }
-    }
-
-    func bootEnvironment() -> Environment {
-        var environment: String
-
-        if let value = Process.valueFor(argument: "env") {
-            Log.info("Environment override: \(value)")
-            environment = value
-        } else {
-            // TODO: This should default to "production" in release builds
-            environment = "development"
-        }
-
-        if let handler = self.detectEnvironmentHandler {
-            return handler(environment)
-        } else {
-            return Environment(id: environment)
-        }
-    }
-
-    /**
-        If multiple environments are passed, return
-        value will be true if at least one of the passed
-        in environment values matches the app environment
-        and false if none of them match.
-
-        If a single environment is passed, the return
-        value will be true if the the passed in environment
-        matches the app environment.
-    */
-    public func inEnvironment(_ environments: Environment...) -> Bool {
-        return environments.contains(self.environment)
     }
 
     func bootRoutes() {
         routes.forEach(router.register)
     }
 
-    func bootArguments() {
-        //grab process args
-        if let workDir = Process.valueFor(argument: "workDir") {
-            Log.info("Work dir override: \(workDir)")
-            self.workDir = workDir
-        }
-
-        if let ip = Process.valueFor(argument: "ip") {
-            Log.info("IP override: \(ip)")
-            self.ip = ip
-        }
-
-        if let port = Process.valueFor(argument: "port")?.int {
-            Log.info("Port override: \(port)")
-            self.port = port
-        }
-    }
-
-    /**
-        Boots the chosen server driver and
-        optionally runs on the supplied
-        ip & port overrides
-    */
-    public func start(ip: String? = nil, port: Int? = nil) {
-        self.ip = ip ?? self.ip
-        self.port = port ?? self.port
-
-        bootArguments()
-        bootProviders()
-
-        bootRoutes()
-
-        if environment == .Production {
-            Log.info("Production mode detected, disabling information logs.")
-            Log.enabledLevels = [.error, .fatal]
-        }
-
+    private func startServer() {
         do {
-            Log.info("Server starting on \(self.ip):\(self.port)")
-
-            let server: Server
-            if let presetServer = self.server {
-                server = presetServer
-            } else {
-                server = try HTTPStreamServer<ServerSocket>(
-                    host: self.ip,
-                    port: self.port,
-                    responder: self
-                )
-                self.server = server
-            }
-
+            Log.info("Server starting ...")
+            let server = try serverType.init(host: host, port: port, responder: self)
+            // noreturn
             try server.start()
         } catch {
             Log.error("Server start error: \(error)")
         }
     }
+}
 
+extension Application {
     func checkFileSystem(for request: Request) -> Request.Handler? {
         // Check in file system
         let filePath = self.workDir + "Public" + (request.uri.path ?? "")
@@ -242,7 +192,7 @@ public class Application {
                 var headers: Response.Headers = [:]
 
                 if
-                    let fileExtension = filePath.split(byString: ".").last,
+                    let fileExtension = filePath.components(separatedBy: ".").last,
                     let type = mediaType(forFileExtension: fileExtension)
                 {
                     headers["Content-Type"] = Response.Headers.Values(type.description)
@@ -256,6 +206,15 @@ public class Application {
                 return Response(status: .notFound, text: "Page not found")
             }
         }
+    }
+}
+
+extension Application {
+    public func add(_ middleware: Middleware...) {
+        middleware.forEach { globalMiddleware.append($0) }
+    }
+    public func add(_ middleware: [Middleware]) {
+        middleware.forEach { globalMiddleware.append($0) }
     }
 }
 
@@ -276,7 +235,7 @@ extension Application: Responder {
         var responder: Responder
         var request = request
 
-        request.parseData()
+        request.cacheParsedContent()
 
         // Check in routes
         if let (parameters, routerHandler) = router.route(request) {
@@ -292,7 +251,7 @@ extension Application: Responder {
         }
 
         // Loop through middlewares in order
-        for middleware in self.middleware {
+        for middleware in self.globalMiddleware {
             responder = middleware.chain(to: responder)
         }
 
@@ -305,7 +264,7 @@ extension Application: Responder {
             }
         } catch {
             var error = "Server Error: \(error)"
-            if environment == .Production {
+            if config.environment == .production {
                 error = "Something went wrong"
             }
 
@@ -313,9 +272,8 @@ extension Application: Responder {
         }
 
         response.headers["Date"] = Response.Headers.Values(Response.date)
-        response.headers["Server"] = Response.Headers.Values("Vapor \(Application.VERSION)")
+        response.headers["Server"] = Response.Headers.Values("Vapor \(Vapor.VERSION)")
 
         return response
     }
-
 }
