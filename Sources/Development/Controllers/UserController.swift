@@ -57,7 +57,7 @@ class UserController: Controller {
         Delete all instances.
      */
     func destroyAll(_ request: Request) throws -> ResponseRepresentable {
-        return Json([
+        return JSON([
             "controller": "MyController.destroyAll"
         ])
     }
